@@ -11,7 +11,9 @@ let state = {
   securityWarnings: [],
   searchQuery: '',
   sortBy: 'newest',
-  theme: 'dark'
+  theme: 'dark',
+  currentRepo: null,
+  currentFile: null
 };
 
 function generateId() {
@@ -22,25 +24,141 @@ function saveState() {
   localStorage.setItem('miniseres_pastes', JSON.stringify(state.pastes));
 }
 
+function getDeviceId() {
+  let deviceId = localStorage.getItem('miniseres_device_id');
+  if (!deviceId) {
+    const ua = navigator.userAgent;
+    const res = window.screen.width + 'x' + window.screen.height;
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const hash = btoa(ua + res + tz).substring(0, 12);
+    deviceId = 'user_' + hash;
+    localStorage.setItem('miniseres_device_id', deviceId);
+  }
+  return deviceId;
+}
+
+function getUsername() {
+  let username = localStorage.getItem('miniseres_username');
+  if (!username) {
+    username = prompt('Nhap ten thiet bi (A-Z, a-z, 0-9, ._-):', 'my-device');
+    if (!username || !/^[A-Za-z0-9._-]+$/.test(username)) {
+      alert('Ten chi duoc chua A-Z, a-z, 0-9, . _ -');
+      username = 'user_' + Date.now().toString(36);
+    }
+    localStorage.setItem('miniseres_username', username);
+  }
+  return username;
+}
+
+function getRepos() {
+  const raw = localStorage.getItem('miniseres_repos');
+  return raw ? JSON.parse(raw) : {};
+}
+
+function saveRepos(repos) {
+  localStorage.setItem('miniseres_repos', JSON.stringify(repos));
+}
+
+function createRepo(repoName) {
+  const username = getUsername();
+  const repos = getRepos();
+  if (repos[repoName]) {
+    alert('Repo "' + repoName + '" da ton tai!');
+    return false;
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(repoName)) {
+    alert('Ten repo chi duoc chua A-Z, a-z, 0-9, . _ -');
+    return false;
+  }
+  repos[repoName] = {
+    name: repoName,
+    owner: username,
+    deviceId: getDeviceId(),
+    created: new Date().toISOString(),
+    files: {}
+  };
+  saveRepos(repos);
+  return true;
+}
+
+function listRepos() {
+  const repos = getRepos();
+  return Object.keys(repos);
+}
+
+function getFiles(repoName) {
+  const repos = getRepos();
+  if (!repos[repoName]) return null;
+  return repos[repoName].files;
+}
+
+function createFile(repoName, fileName, content, language) {
+  const repos = getRepos();
+  if (!repos[repoName]) {
+    alert('Repo khong ton tai!');
+    return false;
+  }
+  if (repos[repoName].files[fileName]) {
+    alert('File "' + fileName + '" da ton tai trong repo nay!');
+    return false;
+  }
+  if (!/^[A-Za-z0-9._-]+$/.test(fileName)) {
+    alert('Ten file chi duoc chua A-Z, a-z, 0-9, . _ -');
+    return false;
+  }
+  repos[repoName].files[fileName] = {
+    content: content,
+    language: language,
+    created: new Date().toISOString(),
+    updated: new Date().toISOString(),
+    views: 0,
+    rawViews: 0
+  };
+  saveRepos(repos);
+  return true;
+}
+
+function getFile(repoName, fileName) {
+  const repos = getRepos();
+  if (!repos[repoName]) return null;
+  return repos[repoName].files[fileName] || null;
+}
+
+function deleteFile(repoName, fileName) {
+  const repos = getRepos();
+  if (!repos[repoName]) return false;
+  delete repos[repoName].files[fileName];
+  saveRepos(repos);
+  return true;
+}
+
+function deleteRepo(repoName) {
+  const repos = getRepos();
+  if (!repos[repoName]) return false;
+  delete repos[repoName];
+  saveRepos(repos);
+  return true;
+}
+
 function navigate(path) {
   if (!path || path === '/') {
-    showEditor();
+    showDashboard();
     return;
   }
   
   const parts = path.split('/').filter(p => p);
   
-  if (parts[0] === 'raw' && parts.length >= 2) {
-    const id = parts[1];
-    const name = parts.slice(2).join('/') || '';
-    showRaw(id, name);
+  if (parts[0] === 'raw' && parts.length >= 3) {
+    const repo = parts[1];
+    const file = parts.slice(2).join('/');
+    showRawFile(repo, file);
     return;
   }
   
-  if (parts[0] === 'view' && parts.length >= 2) {
-    const id = parts[1];
-    const name = parts.slice(2).join('/') || '';
-    showView(id, name);
+  if (parts.length >= 2) {
+    const repo = parts[0];
+    const file = parts.slice(1).join('/');
+    showViewFile(repo, file);
     return;
   }
   
@@ -54,12 +172,12 @@ function navigate(path) {
     return;
   }
   
-  showEditor();
+  showDashboard();
 }
 
 function render() {
-  const path = window.location.pathname;
-  navigate(path);
+  const path = window.location.pathname.replace(/^\/+/, '');
+  navigate(path || '/');
 }
 
 function scanForSecurityIssues(content, language) {
@@ -67,13 +185,13 @@ function scanForSecurityIssues(content, language) {
   
   if (language === 'lua' || language === 'auto') {
     const luaPatterns = [
-      { pattern: /loadstring\s*\(/i, msg: '⚠️ loadstring() - có thể thực thi mã độc' },
-      { pattern: /load\s*\(/i, msg: '⚠️ load() - có thể thực thi mã độc' },
-      { pattern: /dofile\s*\(/i, msg: '⚠️ dofile() - có thể đọc file hệ thống' },
-      { pattern: /io\.open\s*\(/i, msg: '⚠️ io.open() - có thể truy cập file hệ thống' },
-      { pattern: /os\.execute\s*\(/i, msg: '⚠️ os.execute() - có thể thực thi lệnh hệ thống' },
-      { pattern: /os\.remove\s*\(/i, msg: '⚠️ os.remove() - có thể xóa file' },
-      { pattern: /debug\./i, msg: '⚠️ debug library - có thể truy cập nội bộ' }
+      { pattern: /loadstring\s*\(/i, msg: 'loadstring() - co the thuc thi ma doc' },
+      { pattern: /load\s*\(/i, msg: 'load() - co the thuc thi ma doc' },
+      { pattern: /dofile\s*\(/i, msg: 'dofile() - co the doc file he thong' },
+      { pattern: /io\.open\s*\(/i, msg: 'io.open() - co the truy cap file he thong' },
+      { pattern: /os\.execute\s*\(/i, msg: 'os.execute() - co the thuc thi lenh he thong' },
+      { pattern: /os\.remove\s*\(/i, msg: 'os.remove() - co the xoa file' },
+      { pattern: /debug\./i, msg: 'debug library - co the truy cap noi bo' }
     ];
     
     for (const p of luaPatterns) {
@@ -85,10 +203,10 @@ function scanForSecurityIssues(content, language) {
   
   if (language === 'javascript' || language === 'typescript' || language === 'auto') {
     const jsPatterns = [
-      { pattern: /eval\s*\(/i, msg: '⚠️ eval() - có thể thực thi mã độc' },
-      { pattern: /Function\s*\(/i, msg: '⚠️ Function() - có thể thực thi mã độc' },
-      { pattern: /document\.write\s*\(/i, msg: '⚠️ document.write() - có thể gây XSS' },
-      { pattern: /innerHTML\s*=/i, msg: '⚠️ innerHTML - có thể gây XSS' }
+      { pattern: /eval\s*\(/i, msg: 'eval() - co the thuc thi ma doc' },
+      { pattern: /Function\s*\(/i, msg: 'Function() - co the thuc thi ma doc' },
+      { pattern: /document\.write\s*\(/i, msg: 'document.write() - co the gay XSS' },
+      { pattern: /innerHTML\s*=/i, msg: 'innerHTML - co the gay XSS' }
     ];
     
     for (const p of jsPatterns) {
@@ -100,10 +218,10 @@ function scanForSecurityIssues(content, language) {
   
   if (language === 'python' || language === 'auto') {
     const pyPatterns = [
-      { pattern: /eval\s*\(/i, msg: '⚠️ eval() - có thể thực thi mã độc' },
-      { pattern: /exec\s*\(/i, msg: '⚠️ exec() - có thể thực thi mã độc' },
-      { pattern: /__import__\s*\(/i, msg: '⚠️ __import__() - có thể import module nguy hiểm' },
-      { pattern: /os\.system\s*\(/i, msg: '⚠️ os.system() - có thể thực thi lệnh hệ thống' }
+      { pattern: /eval\s*\(/i, msg: 'eval() - co the thuc thi ma doc' },
+      { pattern: /exec\s*\(/i, msg: 'exec() - co the thuc thi ma doc' },
+      { pattern: /__import__\s*\(/i, msg: '__import__() - co the import module nguy hiem' },
+      { pattern: /os\.system\s*\(/i, msg: 'os.system() - co the thuc thi lenh he thong' }
     ];
     
     for (const p of pyPatterns) {
@@ -115,11 +233,11 @@ function scanForSecurityIssues(content, language) {
   
   if (language === 'php' || language === 'auto') {
     const phpPatterns = [
-      { pattern: /eval\s*\(/i, msg: '⚠️ eval() - có thể thực thi mã độc' },
-      { pattern: /system\s*\(/i, msg: '⚠️ system() - có thể thực thi lệnh hệ thống' },
-      { pattern: /exec\s*\(/i, msg: '⚠️ exec() - có thể thực thi lệnh hệ thống' },
-      { pattern: /shell_exec\s*\(/i, msg: '⚠️ shell_exec() - có thể thực thi lệnh hệ thống' },
-      { pattern: /passthru\s*\(/i, msg: '⚠️ passthru() - có thể thực thi lệnh hệ thống' }
+      { pattern: /eval\s*\(/i, msg: 'eval() - co the thuc thi ma doc' },
+      { pattern: /system\s*\(/i, msg: 'system() - co the thuc thi lenh he thong' },
+      { pattern: /exec\s*\(/i, msg: 'exec() - co the thuc thi lenh he thong' },
+      { pattern: /shell_exec\s*\(/i, msg: 'shell_exec() - co the thuc thi lenh he thong' },
+      { pattern: /passthru\s*\(/i, msg: 'passthru() - co the thuc thi lenh he thong' }
     ];
     
     for (const p of phpPatterns) {
@@ -155,9 +273,9 @@ function showSecurityWarning(warnings) {
     <div style="display:flex;align-items:flex-start;gap:12px;">
       <div style="font-size:20px;color:#f85149;">⚠️</div>
       <div>
-        <div style="font-weight:600;color:#f85149;margin-bottom:8px;">Cảnh báo bảo mật</div>
+        <div style="font-weight:600;color:#f85149;margin-bottom:8px;">Canh bao bao mat</div>
         ${warnings.map(w => `<div style="color:#ffa28b;font-size:13px;margin:4px 0;">• ${w}</div>`).join('')}
-        <div style="color:#8b949e;font-size:12px;margin-top:8px;">💡 Đây chỉ là cảnh báo, code vẫn được lưu</div>
+        <div style="color:#8b949e;font-size:12px;margin-top:8px;">Day chi la canh bao, code van duoc luu</div>
       </div>
     </div>
   `;
@@ -170,14 +288,11 @@ function showSecurityWarning(warnings) {
   }, 8000);
 }
 
-function showEditor() {
-  state.view = 'editor';
-  state.rawMode = false;
-  state.currentId = null;
-  state.content = '';
-  state.language = 'auto';
-  state.nameInput = '';
-  state.securityWarnings = [];
+function showDashboard() {
+  const username = getUsername();
+  const deviceId = getDeviceId();
+  const repos = getRepos();
+  const repoList = Object.keys(repos);
   
   app.innerHTML = `
     <div class="app">
@@ -188,54 +303,244 @@ function showEditor() {
             MiniSeres<span>.Raw</span>
           </div>
           <nav class="header-nav">
-            <button class="active" onclick="navigate('/')"><i class="fas fa-edit"></i> Editor</button>
-            <button onclick="navigate('/history')"><i class="fas fa-history"></i> History</button>
-            <button onclick="navigate('/stats')"><i class="fas fa-chart-bar"></i> Stats</button>
+            <button class="active" onclick="navigate('/')"><i class="fas fa-folder"></i> Dashboard</button>
+            <button onclick="navigate('history')"><i class="fas fa-history"></i> History</button>
+            <button onclick="navigate('stats')"><i class="fas fa-chart-bar"></i> Stats</button>
           </nav>
         </div>
         <div class="header-actions">
-          <button class="btn" onclick="navigate('/')"><i class="fas fa-plus"></i> <span>New</span></button>
-          <button class="btn" onclick="navigate('/history')"><i class="fas fa-clock"></i> <span>History</span></button>
-          <button class="btn" onclick="exportAllPastes()"><i class="fas fa-download"></i> <span>Export</span></button>
-          <button class="btn" onclick="importPastes()"><i class="fas fa-upload"></i> <span>Import</span></button>
+          <span style="color:var(--text-secondary);font-size:13px;display:flex;align-items:center;gap:6px;">
+            <i class="fas fa-user"></i> ${username}
+          </span>
+          <button class="btn" onclick="showNewRepo()"><i class="fas fa-plus"></i> <span>New Repo</span></button>
+          <button class="btn" onclick="navigate('/')"><i class="fas fa-sync"></i> <span>Refresh</span></button>
+        </div>
+      </header>
+      <div class="editor-container">
+        <div style="display:flex;gap:16px;flex-wrap:wrap;padding:8px 0;">
+          <div style="flex:1;min-width:200px;">
+            <h3 style="color:var(--text-secondary);font-size:14px;margin-bottom:8px;">📁 Repositories</h3>
+            ${repoList.length === 0 ? `
+              <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:24px;text-align:center;">
+                <i class="fas fa-inbox" style="font-size:32px;color:var(--text-muted);"></i>
+                <p style="color:var(--text-secondary);margin-top:8px;">Chua co repo nao</p>
+                <button class="btn btn-primary" onclick="showNewRepo()" style="margin-top:12px;">
+                  <i class="fas fa-plus"></i> Tao repo dau tien
+                </button>
+              </div>
+            ` : ''}
+            ${repoList.map(repoName => {
+              const repo = repos[repoName];
+              const fileCount = Object.keys(repo.files).length;
+              return `
+                <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:12px 16px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+                  <div style="cursor:pointer;" onclick="openRepo('${repoName}')">
+                    <div style="font-weight:500;color:var(--text-primary);">
+                      <i class="fas fa-folder" style="color:var(--accent-orange);"></i> ${repoName}
+                    </div>
+                    <div style="font-size:12px;color:var(--text-secondary);">
+                      ${fileCount} file${fileCount !== 1 ? 's' : ''} • ${new Date(repo.created).toLocaleDateString()}
+                    </div>
+                  </div>
+                  <div style="display:flex;gap:6px;">
+                    <button class="btn" onclick="openRepo('${repoName}')" style="padding:4px 10px;font-size:12px;">
+                      <i class="fas fa-folder-open"></i>
+                    </button>
+                    <button class="btn btn-danger" onclick="deleteRepo('${repoName}')" style="padding:4px 10px;font-size:12px;">
+                      <i class="fas fa-trash"></i>
+                    </button>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      </div>
+      <div class="status-bar">
+        <span><i class="fas fa-shield-alt" style="color:var(--accent-green);"></i> ${deviceId}</span>
+        <span>${repoList.length} repo${repoList.length !== 1 ? 's' : ''}</span>
+        <span><i class="fas fa-circle" style="color:var(--accent-green);font-size:8px;"></i> Ready</span>
+      </div>
+    </div>
+  `;
+}
+
+function showNewRepo() {
+  const name = prompt('Nhap ten repo (A-Z, a-z, 0-9, ._-):');
+  if (!name) return;
+  if (createRepo(name)) {
+    showToast('Da tao repo "' + name + '"!');
+    showDashboard();
+  }
+}
+
+function openRepo(repoName) {
+  state.currentRepo = repoName;
+  showRepoFiles(repoName);
+}
+
+function showRepoFiles(repoName) {
+  const repos = getRepos();
+  const repo = repos[repoName];
+  if (!repo) {
+    showDashboard();
+    return;
+  }
+  
+  const files = Object.keys(repo.files);
+  const username = getUsername();
+  
+  app.innerHTML = `
+    <div class="app">
+      <header class="header">
+        <div class="header-left">
+          <div class="logo" onclick="navigate('/')">
+            <i class="fas fa-bolt"></i>
+            MiniSeres<span>.Raw</span>
+          </div>
+          <nav class="header-nav">
+            <button onclick="navigate('/')"><i class="fas fa-folder"></i> Dashboard</button>
+            <button class="active"><i class="fas fa-folder-open"></i> ${repoName}</button>
+            <button onclick="navigate('history')"><i class="fas fa-history"></i> History</button>
+          </nav>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-success" onclick="showNewFile('${repoName}')"><i class="fas fa-plus"></i> <span>New File</span></button>
+          <button class="btn" onclick="navigate('/')"><i class="fas fa-arrow-left"></i> <span>Back</span></button>
+        </div>
+      </header>
+      <div class="editor-container">
+        <div style="display:flex;gap:16px;flex-wrap:wrap;padding:8px 0;">
+          <div style="flex:1;min-width:200px;">
+            <h3 style="color:var(--text-secondary);font-size:14px;margin-bottom:8px;">
+              📄 Files in <span style="color:var(--text-primary);">${repoName}</span>
+            </h3>
+            ${files.length === 0 ? `
+              <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:24px;text-align:center;">
+                <i class="fas fa-file" style="font-size:32px;color:var(--text-muted);"></i>
+                <p style="color:var(--text-secondary);margin-top:8px;">Chua co file nao</p>
+                <button class="btn btn-primary" onclick="showNewFile('${repoName}')" style="margin-top:12px;">
+                  <i class="fas fa-plus"></i> Tao file dau tien
+                </button>
+              </div>
+            ` : ''}
+            ${files.map(fileName => {
+              const file = repo.files[fileName];
+              return `
+                <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:12px 16px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+                  <div style="cursor:pointer;" onclick="navigate('${repoName}/${fileName}')">
+                    <div style="font-weight:500;color:var(--text-primary);">
+                      <i class="fas fa-file-code" style="color:var(--accent-blue);"></i> ${fileName}
+                    </div>
+                    <div style="font-size:12px;color:var(--text-secondary);">
+                      ${file.language} • ${file.content.length} chars • 👁 ${file.views || 0}
+                    </div>
+                  </div>
+                  <div style="display:flex;gap:6px;">
+                    <button class="btn" onclick="navigate('${repoName}/${fileName}')" style="padding:4px 10px;font-size:12px;">
+                      <i class="fas fa-eye"></i>
+                    </button>
+                    <button class="btn" onclick="navigate('raw/${repoName}/${fileName}')" style="padding:4px 10px;font-size:12px;">
+                      <i class="fas fa-link"></i>
+                    </button>
+                    <button class="btn btn-danger" onclick="deleteFile('${repoName}', '${fileName}')" style="padding:4px 10px;font-size:12px;">
+                      <i class="fas fa-trash"></i>
+                    </button>
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      </div>
+      <div class="status-bar">
+        <span><i class="fas fa-folder"></i> ${repoName}</span>
+        <span>${files.length} file${files.length !== 1 ? 's' : ''}</span>
+        <span><i class="fas fa-circle" style="color:var(--accent-green);font-size:8px;"></i> Ready</span>
+      </div>
+    </div>
+  `;
+}
+
+function showNewFile(repoName) {
+  const fileName = prompt('Nhap ten file (A-Z, a-z, 0-9, ._-):');
+  if (!fileName) return;
+  
+  state.currentRepo = repoName;
+  state.currentFile = fileName;
+  state.content = '';
+  state.language = 'auto';
+  state.nameInput = fileName;
+  
+  showEditor(repoName, fileName);
+}
+
+function showEditor(repoName, fileName) {
+  state.view = 'editor';
+  state.rawMode = false;
+  state.content = '';
+  state.language = 'auto';
+  state.nameInput = fileName || 'untitled';
+  state.securityWarnings = [];
+  
+  const existing = fileName ? getFile(repoName, fileName) : null;
+  if (existing) {
+    state.content = existing.content;
+    state.language = existing.language;
+  }
+  
+  app.innerHTML = `
+    <div class="app">
+      <header class="header">
+        <div class="header-left">
+          <div class="logo" onclick="navigate('/')">
+            <i class="fas fa-bolt"></i>
+            MiniSeres<span>.Raw</span>
+          </div>
+          <nav class="header-nav">
+            <button onclick="navigate('/')"><i class="fas fa-folder"></i> Dashboard</button>
+            <button onclick="openRepo('${repoName}')"><i class="fas fa-folder-open"></i> ${repoName}</button>
+            <button class="active"><i class="fas fa-edit"></i> ${fileName || 'Editor'}</button>
+          </nav>
+        </div>
+        <div class="header-actions">
+          <button class="btn" onclick="openRepo('${repoName}')"><i class="fas fa-arrow-left"></i> <span>Back</span></button>
         </div>
       </header>
       <div class="editor-container">
         <div class="toolbar">
           <select id="langSelect">
-            <option value="auto">🔍 Auto-detect</option>
-            <option value="python">🐍 Python</option>
-            <option value="lua">📜 Lua</option>
-            <option value="cpp">⚙️ C++</option>
-            <option value="ruby">💎 Ruby</option>
-            <option value="typescript">📘 TypeScript</option>
-            <option value="javascript">🟨 JavaScript</option>
-            <option value="html">🌐 HTML</option>
-            <option value="css">🎨 CSS</option>
-            <option value="json">📦 JSON</option>
-            <option value="sql">🗄️ SQL</option>
-            <option value="bash">💻 Bash</option>
-            <option value="go">🐹 Go</option>
-            <option value="rust">🦀 Rust</option>
-            <option value="php">🐘 PHP</option>
+            <option value="auto">Auto-detect</option>
+            <option value="python">Python</option>
+            <option value="lua">Lua</option>
+            <option value="cpp">C++</option>
+            <option value="ruby">Ruby</option>
+            <option value="typescript">TypeScript</option>
+            <option value="javascript">JavaScript</option>
+            <option value="html">HTML</option>
+            <option value="css">CSS</option>
+            <option value="json">JSON</option>
+            <option value="sql">SQL</option>
+            <option value="bash">Bash</option>
+            <option value="go">Go</option>
+            <option value="rust">Rust</option>
+            <option value="php">PHP</option>
           </select>
-          <input type="text" id="nameInput" placeholder="📝 Tên paste..." value="untitled">
-          <button class="btn" onclick="loadFromFile()"><i class="fas fa-folder-open"></i> <span>File</span></button>
-          <button class="btn btn-success" onclick="createPaste()"><i class="fas fa-cloud-upload-alt"></i> <span>Paste</span></button>
+          <input type="text" id="nameInput" placeholder="Ten file..." value="${fileName || 'untitled'}">
+          <button class="btn" onclick="loadFromFile()"><i class="fas fa-folder-open"></i> File</button>
+          <button class="btn btn-success" onclick="saveFileToRepo('${repoName}')"><i class="fas fa-save"></i> Save</button>
           <button class="btn" onclick="toggleWordWrap()"><i class="fas ${state.wordWrap ? 'fa-wrap' : 'fa-arrows-alt'}"></i></button>
           <button class="btn" onclick="formatCode()"><i class="fas fa-magic"></i></button>
           <button class="btn" onclick="copyContent()"><i class="fas fa-copy"></i></button>
           <button class="btn" onclick="downloadContent()"><i class="fas fa-download"></i></button>
           <button class="btn" onclick="scanCode()" style="background:#1a0e0e;border-color:#f85149;color:#f85149;">
-            <i class="fas fa-shield-alt"></i> <span>Scan</span>
+            <i class="fas fa-shield-alt"></i> Scan
           </button>
-          <button class="btn" onclick="minifyCode()"><i class="fas fa-compress-alt"></i></button>
-          <button class="btn" onclick="sharePaste()"><i class="fas fa-share-alt"></i></button>
         </div>
         <div class="editor-wrapper">
           <div class="line-numbers" id="lineNumbers">1</div>
           <div class="code-area">
-            <textarea id="codeEditor" spellcheck="false" placeholder="// Viết code của bạn ở đây..."></textarea>
+            <textarea id="codeEditor" spellcheck="false" placeholder="// Viet code cua ban o day..."></textarea>
             <pre><code id="highlightCode" class=""></code></pre>
           </div>
         </div>
@@ -335,6 +640,181 @@ function showEditor() {
   editor.focus();
 }
 
+function saveFileToRepo(repoName) {
+  const editor = document.getElementById('codeEditor');
+  const nameInput = document.getElementById('nameInput');
+  const langSelect = document.getElementById('langSelect');
+  
+  const content = editor ? editor.value : state.content;
+  const fileName = nameInput ? nameInput.value.trim() || 'untitled' : 'untitled';
+  const language = langSelect ? langSelect.value : state.language;
+  
+  if (!content.trim()) {
+    showToast('Vui long nhap noi dung!');
+    return;
+  }
+  
+  const warnings = scanForSecurityIssues(content, language);
+  if (warnings.length > 0) {
+    const confirmSave = confirm(
+      'Phat hien ' + warnings.length + ' van de bao mat:\n\n' + warnings.join('\n') + '\n\nVan muon luu file?'
+    );
+    if (!confirmSave) return;
+  }
+  
+  const repos = getRepos();
+  if (!repos[repoName]) {
+    showToast('Repo khong ton tai!');
+    return;
+  }
+  
+  if (repos[repoName].files[fileName]) {
+    const confirmOverwrite = confirm('File "' + fileName + '" da ton tai. Ghi de?');
+    if (!confirmOverwrite) return;
+  }
+  
+  repos[repoName].files[fileName] = {
+    content: content,
+    language: language,
+    created: repos[repoName].files[fileName] ? repos[repoName].files[fileName].created : new Date().toISOString(),
+    updated: new Date().toISOString(),
+    views: repos[repoName].files[fileName] ? repos[repoName].files[fileName].views || 0 : 0,
+    rawViews: repos[repoName].files[fileName] ? repos[repoName].files[fileName].rawViews || 0 : 0
+  };
+  
+  saveRepos(repos);
+  showToast('Da luu file "' + fileName + '"!');
+  
+  const url = '/' + repoName + '/' + encodeURIComponent(fileName);
+  window.history.pushState({}, '', url);
+  openRepo(repoName);
+}
+
+function showViewFile(repoName, fileName) {
+  const file = getFile(repoName, fileName);
+  if (!file) {
+    showDashboard();
+    return;
+  }
+  
+  const repos = getRepos();
+  repos[repoName].files[fileName].views = (repos[repoName].files[fileName].views || 0) + 1;
+  saveRepos(repos);
+  
+  const rawUrl = '/raw/' + repoName + '/' + encodeURIComponent(fileName);
+  const warnings = scanForSecurityIssues(file.content, file.language);
+  
+  app.innerHTML = `
+    <div class="app">
+      <header class="header">
+        <div class="header-left">
+          <div class="logo" onclick="navigate('/')">
+            <i class="fas fa-bolt"></i>
+            MiniSeres<span>.Raw</span>
+          </div>
+          <nav class="header-nav">
+            <button onclick="navigate('/')"><i class="fas fa-folder"></i> Dashboard</button>
+            <button onclick="openRepo('${repoName}')"><i class="fas fa-folder-open"></i> ${repoName}</button>
+            <button class="active"><i class="fas fa-file-code"></i> ${fileName}</button>
+          </nav>
+        </div>
+        <div class="header-actions">
+          <button class="btn" onclick="openRepo('${repoName}')"><i class="fas fa-arrow-left"></i> <span>Back</span></button>
+        </div>
+      </header>
+      <div class="view-container">
+        <div class="view-header">
+          <div class="info">
+            <span class="badge"><i class="fas fa-code"></i> ${file.language}</span>
+            <span class="badge"><i class="fas fa-eye"></i> ${file.views || 0}</span>
+            <span class="badge"><i class="fas fa-calendar"></i> ${new Date(file.created).toLocaleDateString()}</span>
+            <span class="badge"><i class="fas fa-tag"></i> ${fileName}</span>
+            ${warnings.length > 0 ? `<span class="badge" style="border-color:#f85149;color:#f85149;"><i class="fas fa-exclamation-triangle"></i> ${warnings.length} warnings</span>` : ''}
+          </div>
+          <div class="actions">
+            <button class="btn" onclick="copyViewContent()"><i class="fas fa-copy"></i></button>
+            <button class="btn" onclick="downloadViewContent()"><i class="fas fa-download"></i></button>
+            <button class="btn btn-primary" onclick="window.open('${rawUrl}', '_blank')"><i class="fas fa-link"></i> RAW</button>
+            <button class="btn" onclick="copyRawLink('${rawUrl}')"><i class="fas fa-copy"></i> Link</button>
+            <button class="btn" onclick="editFile('${repoName}', '${fileName}')"><i class="fas fa-edit"></i></button>
+            <button class="btn btn-danger" onclick="deleteFile('${repoName}', '${fileName}')"><i class="fas fa-trash"></i></button>
+          </div>
+        </div>
+        ${warnings.length > 0 ? `
+          <div style="background:#1a0e0e;border:1px solid #f85149;border-radius:8px;padding:12px 16px;flex-shrink:0;">
+            <div style="display:flex;align-items:center;gap:8px;color:#f85149;font-weight:600;font-size:13px;">
+              <i class="fas fa-shield-alt"></i>
+              Canh bao bao mat: ${warnings.length} van de
+            </div>
+            ${warnings.map(w => `<div style="color:#ffa28b;font-size:12px;margin:4px 0 0 24px;">• ${w}</div>`).join('')}
+          </div>
+        ` : ''}
+        <div class="view-content">
+          <pre><code class="${file.language}">${escapeHtml(file.content)}</code></pre>
+        </div>
+      </div>
+      <div class="status-bar">
+        <span><i class="fas fa-link"></i> ${window.location.origin}${rawUrl}</span>
+        <span><i class="fas fa-circle" style="color:var(--accent-green);font-size:8px;"></i> ${file.views || 0} views</span>
+        <span>${file.content.length} chars</span>
+      </div>
+    </div>
+  `;
+  
+  const codeEl = document.querySelector('.view-content code');
+  if (codeEl && window.hljs) {
+    try {
+      window.hljs.highlightElement(codeEl);
+    } catch(e) {}
+  }
+}
+
+function showRawFile(repoName, fileName) {
+  const file = getFile(repoName, fileName);
+  if (!file) {
+    document.body.innerHTML = '<div style="padding:20px;font-family:monospace;">404 - File not found</div>';
+    return;
+  }
+  
+  const repos = getRepos();
+  repos[repoName].files[fileName].rawViews = (repos[repoName].files[fileName].rawViews || 0) + 1;
+  saveRepos(repos);
+  
+  document.body.innerHTML = `
+    <div class="raw-container">
+      <div class="raw-content">${escapeHtml(file.content)}</div>
+    </div>
+  `;
+  
+  document.body.style.margin = '0';
+  document.body.style.background = '#ffffff';
+}
+
+function editFile(repoName, fileName) {
+  const file = getFile(repoName, fileName);
+  if (!file) return;
+  state.content = file.content;
+  state.language = file.language;
+  state.nameInput = fileName;
+  showEditor(repoName, fileName);
+}
+
+function deleteFile(repoName, fileName) {
+  if (!confirm('Xoa file "' + fileName + '"?')) return;
+  if (deleteFile(repoName, fileName)) {
+    showToast('Da xoa file!');
+    openRepo(repoName);
+  }
+}
+
+function deleteRepo(repoName) {
+  if (!confirm('Xoa repo "' + repoName + '" va tat ca file trong do?')) return;
+  if (deleteRepo(repoName)) {
+    showToast('Da xoa repo!');
+    showDashboard();
+  }
+}
+
 function updateStats(content) {
   const charCount = document.getElementById('charCount');
   const lineCount = document.getElementById('lineCount');
@@ -369,7 +849,7 @@ function scanCode() {
   if (warnings.length > 0) {
     showSecurityWarning(warnings);
   } else {
-    showToast('✅ Không phát hiện vấn đề bảo mật!');
+    showToast('Khong phat hien van de bao mat!');
   }
 }
 
@@ -470,156 +950,22 @@ function loadFromFile() {
   input.click();
 }
 
-function createPaste() {
-  const editor = document.getElementById('codeEditor');
-  const nameInput = document.getElementById('nameInput');
-  const langSelect = document.getElementById('langSelect');
-  
-  const content = editor ? editor.value : state.content;
-  const name = nameInput ? nameInput.value.trim() || 'untitled' : 'untitled';
-  const language = langSelect ? langSelect.value : state.language;
-  
-  if (!content.trim()) {
-    showToast('⚠️ Vui lòng nhập nội dung!');
-    return;
-  }
-  
-  const warnings = scanForSecurityIssues(content, language);
-  if (warnings.length > 0) {
-    const confirmSave = confirm(
-      `⚠️ Phát hiện ${warnings.length} vấn đề bảo mật:\n\n${warnings.join('\n')}\n\nVẫn muốn lưu paste?`
-    );
-    if (!confirmSave) return;
-  }
-  
-  const id = generateId();
-  const paste = {
-    id: id,
-    name: name,
-    content: content,
-    language: language,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    views: 0,
-    rawViews: 0,
-    securityWarnings: warnings
-  };
-  
-  state.pastes.push(paste);
-  saveState();
-  state.currentId = id;
-  
-  const url = `/view/${id}/${encodeURIComponent(name)}`;
-  window.history.pushState({}, '', url);
-  navigate(url);
-}
-
-function showView(id, name) {
-  state.view = 'view';
-  state.rawMode = false;
-  
-  const paste = state.pastes.find(p => p.id === id);
-  if (!paste) {
-    navigate('/');
-    return;
-  }
-  
-  paste.views = (paste.views || 0) + 1;
-  saveState();
-  
-  const displayName = name || paste.name;
-  const rawUrl = `/raw/${id}/${encodeURIComponent(paste.name)}`;
-  const warnings = paste.securityWarnings || [];
-  
-  app.innerHTML = `
-    <div class="app">
-      <header class="header">
-        <div class="header-left">
-          <div class="logo" onclick="navigate('/')">
-            <i class="fas fa-bolt"></i>
-            MiniSeres<span>.Raw</span>
-          </div>
-          <nav class="header-nav">
-            <button onclick="navigate('/')"><i class="fas fa-edit"></i> Editor</button>
-            <button onclick="navigate('/history')"><i class="fas fa-history"></i> History</button>
-            <button onclick="navigate('/stats')"><i class="fas fa-chart-bar"></i> Stats</button>
-          </nav>
-        </div>
-        <div class="header-actions">
-          <button class="btn" onclick="navigate('/')"><i class="fas fa-plus"></i> <span>New</span></button>
-          <button class="btn" onclick="navigate('/history')"><i class="fas fa-clock"></i> <span>History</span></button>
-        </div>
-      </header>
-      <div class="view-container">
-        <div class="view-header">
-          <div class="info">
-            <span class="badge"><i class="fas fa-code"></i> ${paste.language}</span>
-            <span class="badge"><i class="fas fa-eye"></i> ${paste.views}</span>
-            <span class="badge"><i class="fas fa-calendar"></i> ${new Date(paste.createdAt).toLocaleDateString()}</span>
-            <span class="badge"><i class="fas fa-tag"></i> ${displayName}</span>
-            ${warnings.length > 0 ? `<span class="badge" style="border-color:#f85149;color:#f85149;"><i class="fas fa-exclamation-triangle"></i> ${warnings.length} warnings</span>` : ''}
-          </div>
-          <div class="actions">
-            <button class="btn" onclick="copyViewContent()"><i class="fas fa-copy"></i></button>
-            <button class="btn" onclick="downloadViewContent()"><i class="fas fa-download"></i></button>
-            <button class="btn btn-primary" onclick="window.open('${rawUrl}', '_blank')"><i class="fas fa-link"></i> RAW</button>
-            <button class="btn" onclick="copyRawLink('${rawUrl}')"><i class="fas fa-copy"></i> Link</button>
-            <button class="btn" onclick="editPaste('${paste.id}')"><i class="fas fa-edit"></i></button>
-            <button class="btn btn-danger" onclick="deletePaste('${paste.id}')"><i class="fas fa-trash"></i></button>
-          </div>
-        </div>
-        ${warnings.length > 0 ? `
-          <div style="background:#1a0e0e;border:1px solid #f85149;border-radius:8px;padding:12px 16px;flex-shrink:0;">
-            <div style="display:flex;align-items:center;gap:8px;color:#f85149;font-weight:600;font-size:13px;">
-              <i class="fas fa-shield-alt"></i>
-              Cảnh báo bảo mật: ${warnings.length} vấn đề
-            </div>
-            ${warnings.map(w => `<div style="color:#ffa28b;font-size:12px;margin:4px 0 0 24px;">• ${w}</div>`).join('')}
-          </div>
-        ` : ''}
-        <div class="view-content">
-          <pre><code class="${paste.language}">${escapeHtml(paste.content)}</code></pre>
-        </div>
-      </div>
-      <div class="status-bar">
-        <span><i class="fas fa-link"></i> ${window.location.origin}${rawUrl}</span>
-        <span><i class="fas fa-circle" style="color:var(--accent-green);font-size:8px;"></i> ${paste.views} views</span>
-        <span>${paste.content.length} chars</span>
-      </div>
-    </div>
-  `;
-  
-  const codeEl = document.querySelector('.view-content code');
-  if (codeEl && window.hljs) {
-    try {
-      window.hljs.highlightElement(codeEl);
-    } catch(e) {}
-  }
-}
-
-function showRaw(id, name) {
-  const paste = state.pastes.find(p => p.id === id);
-  if (!paste) {
-    document.body.innerHTML = '<div style="padding:20px;font-family:monospace;">404 - Paste not found</div>';
-    return;
-  }
-  
-  paste.rawViews = (paste.rawViews || 0) + 1;
-  saveState();
-  
-  document.body.innerHTML = `
-    <div class="raw-container">
-      <div class="raw-content">${escapeHtml(paste.content)}</div>
-    </div>
-  `;
-  
-  document.body.style.margin = '0';
-  document.body.style.background = '#ffffff';
-}
-
 function showHistory() {
-  state.view = 'history';
-  state.rawMode = false;
+  const username = getUsername();
+  const repos = getRepos();
+  let allFiles = [];
+  
+  for (const [repoName, repo] of Object.entries(repos)) {
+    for (const [fileName, file] of Object.entries(repo.files)) {
+      allFiles.push({
+        repo: repoName,
+        fileName: fileName,
+        ...file
+      });
+    }
+  }
+  
+  allFiles.sort((a, b) => new Date(b.updated) - new Date(a.updated));
   
   app.innerHTML = `
     <div class="app">
@@ -630,9 +976,9 @@ function showHistory() {
             MiniSeres<span>.Raw</span>
           </div>
           <nav class="header-nav">
-            <button onclick="navigate('/')"><i class="fas fa-edit"></i> Editor</button>
-            <button class="active" onclick="navigate('/history')"><i class="fas fa-history"></i> History</button>
-            <button onclick="navigate('/stats')"><i class="fas fa-chart-bar"></i> Stats</button>
+            <button onclick="navigate('/')"><i class="fas fa-folder"></i> Dashboard</button>
+            <button class="active"><i class="fas fa-history"></i> History</button>
+            <button onclick="navigate('stats')"><i class="fas fa-chart-bar"></i> Stats</button>
           </nav>
         </div>
         <div class="header-actions">
@@ -643,51 +989,45 @@ function showHistory() {
       </header>
       <div class="history-container">
         <div class="history-header">
-          <h2><i class="fas fa-history"></i> Lịch sử Paste</h2>
+          <h2><i class="fas fa-history"></i> Lich su Paste</h2>
           <div style="display:flex;gap:8px;align-items:center;">
-            <input type="text" class="search-box" id="searchBox" placeholder="🔍 Tìm kiếm...">
-            <select id="sortSelect" style="background:var(--bg-secondary);border:1px solid var(--border-color);color:var(--text-secondary);padding:6px 12px;border-radius:6px;font-size:13px;outline:none;cursor:pointer;">
-              <option value="newest">🕐 Mới nhất</option>
-              <option value="oldest">🕐 Cũ nhất</option>
-              <option value="views">👁 Nhiều view</option>
-              <option value="name">📝 Tên A-Z</option>
-            </select>
+            <input type="text" class="search-box" id="searchBox" placeholder="Tim kiem...">
           </div>
         </div>
         <div class="history-list" id="historyList">
-          ${state.pastes.length === 0 ? `
+          ${allFiles.length === 0 ? `
             <div class="history-empty">
               <i class="fas fa-inbox"></i>
-              <h3>Chưa có paste nào</h3>
-              <p>Tạo paste đầu tiên của bạn ngay bây giờ!</p>
-              <button class="btn btn-primary" onclick="navigate('/')" style="margin-top:16px;"><i class="fas fa-plus"></i> Tạo paste</button>
+              <h3>Chua co paste nao</h3>
+              <p>Tao paste dau tien cua ban ngay bay gio!</p>
+              <button class="btn btn-primary" onclick="navigate('/')" style="margin-top:16px;"><i class="fas fa-plus"></i> Tao paste</button>
             </div>
           ` : ''}
-          ${getFilteredAndSortedPastes().map(p => {
-            const warnings = p.securityWarnings || [];
+          ${allFiles.map(p => {
+            const warnings = scanForSecurityIssues(p.content, p.language);
             return `
             <div class="history-item">
               <div class="info">
                 <div class="name">
                   <i class="fas fa-file-code"></i>
-                  ${p.name}
+                  ${p.fileName}
                   <span style="font-size:11px;color:var(--text-muted);font-weight:400;">${p.language}</span>
+                  <span style="font-size:11px;color:var(--accent-orange);">📁 ${p.repo}</span>
                   ${warnings.length > 0 ? `<span style="font-size:11px;color:#f85149;"><i class="fas fa-exclamation-triangle"></i> ${warnings.length}</span>` : ''}
-                  ${p.content.length > 500 ? `<span style="font-size:11px;color:var(--accent-orange);">📄 ${Math.round(p.content.length/1024)}KB</span>` : ''}
                 </div>
                 <div class="meta">
-                  <span><i class="far fa-calendar-alt"></i> ${new Date(p.createdAt).toLocaleString()}</span>
+                  <span><i class="far fa-calendar-alt"></i> ${new Date(p.created).toLocaleString()}</span>
                   <span><i class="fas fa-eye"></i> ${p.views || 0}</span>
                   <span><i class="fas fa-link"></i> ${p.rawViews || 0}</span>
                   <span><i class="fas fa-code"></i> ${p.content.length} chars</span>
-                  <span><i class="fas fa-clock"></i> ${timeAgo(p.createdAt)}</span>
+                  <span><i class="fas fa-clock"></i> ${timeAgo(p.updated)}</span>
                 </div>
               </div>
               <div class="actions">
-                <button class="btn" onclick="navigate('/view/${p.id}/${encodeURIComponent(p.name)}')"><i class="fas fa-eye"></i></button>
-                <button class="btn" onclick="navigate('/raw/${p.id}/${encodeURIComponent(p.name)}')"><i class="fas fa-link"></i></button>
-                <button class="btn" onclick="copyPasteLink('${p.id}')"><i class="fas fa-copy"></i></button>
-                <button class="btn btn-danger" onclick="deletePaste('${p.id}')"><i class="fas fa-trash"></i></button>
+                <button class="btn" onclick="navigate('${p.repo}/${p.fileName}')"><i class="fas fa-eye"></i></button>
+                <button class="btn" onclick="navigate('raw/${p.repo}/${p.fileName}')"><i class="fas fa-link"></i></button>
+                <button class="btn" onclick="copyPasteLink('${p.repo}', '${p.fileName}')"><i class="fas fa-copy"></i></button>
+                <button class="btn btn-danger" onclick="deleteFile('${p.repo}', '${p.fileName}')"><i class="fas fa-trash"></i></button>
               </div>
             </div>
           `}).join('')}
@@ -695,69 +1035,27 @@ function showHistory() {
       </div>
     </div>
   `;
-  
-  const searchBox = document.getElementById('searchBox');
-  const sortSelect = document.getElementById('sortSelect');
-  
-  if (searchBox) {
-    searchBox.value = state.searchQuery || '';
-    searchBox.addEventListener('input', function() {
-      state.searchQuery = this.value;
-      showHistory();
-    });
-  }
-  
-  if (sortSelect) {
-    sortSelect.value = state.sortBy || 'newest';
-    sortSelect.addEventListener('change', function() {
-      state.sortBy = this.value;
-      showHistory();
-    });
-  }
-}
-
-function getFilteredAndSortedPastes() {
-  let filtered = state.pastes;
-  
-  if (state.searchQuery) {
-    const query = state.searchQuery.toLowerCase();
-    filtered = filtered.filter(p => 
-      p.name.toLowerCase().includes(query) || 
-      p.content.toLowerCase().includes(query) ||
-      p.language.toLowerCase().includes(query)
-    );
-  }
-  
-  switch(state.sortBy) {
-    case 'newest':
-      filtered.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      break;
-    case 'oldest':
-      filtered.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-      break;
-    case 'views':
-      filtered.sort((a, b) => (b.views || 0) - (a.views || 0));
-      break;
-    case 'name':
-      filtered.sort((a, b) => a.name.localeCompare(b.name));
-      break;
-  }
-  
-  return filtered;
 }
 
 function showStats() {
-  state.view = 'stats';
-  state.rawMode = false;
-  
-  const total = state.pastes.length;
-  const totalViews = state.pastes.reduce((sum, p) => sum + (p.views || 0), 0);
-  const totalRawViews = state.pastes.reduce((sum, p) => sum + (p.rawViews || 0), 0);
-  const totalChars = state.pastes.reduce((sum, p) => sum + p.content.length, 0);
+  const repos = getRepos();
+  let totalFiles = 0;
+  let totalViews = 0;
+  let totalRawViews = 0;
+  let totalChars = 0;
   const languages = {};
-  state.pastes.forEach(p => {
-    languages[p.language] = (languages[p.language] || 0) + 1;
-  });
+  let totalRepos = Object.keys(repos).length;
+  
+  for (const [repoName, repo] of Object.entries(repos)) {
+    for (const [fileName, file] of Object.entries(repo.files)) {
+      totalFiles++;
+      totalViews += file.views || 0;
+      totalRawViews += file.rawViews || 0;
+      totalChars += file.content.length;
+      languages[file.language] = (languages[file.language] || 0) + 1;
+    }
+  }
+  
   const mostUsedLang = Object.entries(languages).sort((a, b) => b[1] - a[1])[0];
   
   app.innerHTML = `
@@ -769,55 +1067,55 @@ function showStats() {
             MiniSeres<span>.Raw</span>
           </div>
           <nav class="header-nav">
-            <button onclick="navigate('/')"><i class="fas fa-edit"></i> Editor</button>
-            <button onclick="navigate('/history')"><i class="fas fa-history"></i> History</button>
-            <button class="active" onclick="navigate('/stats')"><i class="fas fa-chart-bar"></i> Stats</button>
+            <button onclick="navigate('/')"><i class="fas fa-folder"></i> Dashboard</button>
+            <button onclick="navigate('history')"><i class="fas fa-history"></i> History</button>
+            <button class="active"><i class="fas fa-chart-bar"></i> Stats</button>
           </nav>
         </div>
         <div class="header-actions">
           <button class="btn" onclick="navigate('/')"><i class="fas fa-plus"></i> <span>New</span></button>
-          <button class="btn" onclick="navigate('/history')"><i class="fas fa-clock"></i> <span>History</span></button>
+          <button class="btn" onclick="navigate('history')"><i class="fas fa-clock"></i> <span>History</span></button>
         </div>
       </header>
       <div class="history-container">
         <h2 style="font-size:18px;font-weight:600;color:var(--text-primary);margin-bottom:8px;">
-          <i class="fas fa-chart-bar"></i> Thống kê
+          <i class="fas fa-chart-bar"></i> Thong ke
         </h2>
         <div class="stats-grid">
           <div class="stat-card">
-            <div class="number">${total}</div>
-            <div class="label">📄 Tổng paste</div>
+            <div class="number">${totalRepos}</div>
+            <div class="label">📁 Repos</div>
+          </div>
+          <div class="stat-card">
+            <div class="number">${totalFiles}</div>
+            <div class="label">📄 Files</div>
           </div>
           <div class="stat-card">
             <div class="number">${totalViews}</div>
-            <div class="label">👁 Tổng view</div>
+            <div class="label">👁 Views</div>
           </div>
           <div class="stat-card">
             <div class="number">${totalRawViews}</div>
-            <div class="label">🔗 Tổng raw view</div>
+            <div class="label">🔗 Raw views</div>
           </div>
           <div class="stat-card">
             <div class="number">${formatSize(totalChars)}</div>
-            <div class="label">📦 Tổng dữ liệu</div>
+            <div class="label">📦 Tong du lieu</div>
           </div>
           <div class="stat-card">
             <div class="number">${mostUsedLang ? mostUsedLang[0] : 'N/A'}</div>
-            <div class="label">🏆 Ngôn ngữ phổ biến</div>
-          </div>
-          <div class="stat-card">
-            <div class="number">${state.pastes.length > 0 ? Math.round(totalChars / state.pastes.length) : 0}</div>
-            <div class="label">📝 Trung bình/paste</div>
+            <div class="label">🏆 Ngon ngu pho bien</div>
           </div>
         </div>
         <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:16px;">
-          <h3 style="font-size:14px;color:var(--text-secondary);margin-bottom:12px;">📊 Ngôn ngữ sử dụng</h3>
+          <h3 style="font-size:14px;color:var(--text-secondary);margin-bottom:12px;">📊 Ngon ngu su dung</h3>
           ${Object.entries(languages).map(([lang, count]) => `
             <div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border-color);font-size:13px;">
               <span>${lang}</span>
-              <span style="color:var(--text-secondary);">${count} paste${count > 1 ? 's' : ''}</span>
+              <span style="color:var(--text-secondary);">${count} file${count > 1 ? 's' : ''}</span>
             </div>
           `).join('')}
-          ${Object.keys(languages).length === 0 ? '<div style="color:var(--text-muted);font-size:13px;">Chưa có dữ liệu</div>' : ''}
+          ${Object.keys(languages).length === 0 ? '<div style="color:var(--text-muted);font-size:13px;">Chua co du lieu</div>' : ''}
         </div>
       </div>
     </div>
@@ -842,55 +1140,23 @@ function timeAgo(date) {
   return Math.floor(days / 30) + 'mo';
 }
 
-function deletePaste(id) {
-  if (!confirm('Xóa paste này?')) return;
-  state.pastes = state.pastes.filter(p => p.id !== id);
-  saveState();
-  if (state.currentId === id) {
-    state.currentId = null;
-  }
-  navigate(window.location.pathname || '/');
-}
-
 function clearAllPastes() {
-  if (!confirm('Xóa TẤT CẢ paste? Không thể hoàn tác!')) return;
+  if (!confirm('Xoa TAT CA paste? Khong the hoan tac!')) return;
   state.pastes = [];
   saveState();
   showHistory();
-  showToast('🗑 Đã xóa tất cả!');
+  showToast('Da xoa tat ca!');
 }
 
-function editPaste(id) {
-  const paste = state.pastes.find(p => p.id === id);
-  if (!paste) return;
-  state.content = paste.content;
-  state.language = paste.language;
-  state.nameInput = paste.name;
-  navigate('/');
-  setTimeout(() => {
-    const editor = document.getElementById('codeEditor');
-    if (editor) {
-      editor.value = paste.content;
-      updateHighlight(paste.content, paste.language);
-      updateLineNumbers(paste.content);
-      updateStats(paste.content);
-    }
-    const langSelect = document.getElementById('langSelect');
-    if (langSelect) langSelect.value = paste.language;
-    const nameInput = document.getElementById('nameInput');
-    if (nameInput) nameInput.value = paste.name;
-  }, 100);
-}
-
-function copyPasteLink(id) {
-  const url = window.location.origin + `/view/${id}`;
+function copyPasteLink(repo, file) {
+  const url = window.location.origin + '/' + repo + '/' + file;
   navigator.clipboard.writeText(url).then(() => {
-    showToast('🔗 Đã copy link!');
+    showToast('Da copy link!');
   }).catch(() => {});
 }
 
 function exportAllPastes() {
-  const data = JSON.stringify(state.pastes, null, 2);
+  const data = JSON.stringify(getRepos(), null, 2);
   const blob = new Blob([data], {type: 'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -898,98 +1164,7 @@ function exportAllPastes() {
   a.download = 'miniseres_backup_' + new Date().toISOString().slice(0,10) + '.json';
   a.click();
   URL.revokeObjectURL(url);
-  showToast('📦 Đã export!');
-}
-
-function importPastes() {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = '.json';
-  input.onchange = function(e) {
-    const file = this.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = function(ev) {
-      try {
-        const data = JSON.parse(ev.target.result);
-        if (!Array.isArray(data)) throw new Error('Invalid data');
-        const count = data.length;
-        state.pastes = state.pastes.concat(data);
-        saveState();
-        showToast(`✅ Đã import ${count} paste!`);
-        navigate('/history');
-      } catch(e) {
-        showToast('❌ Lỗi import! File không hợp lệ');
-      }
-    };
-    reader.readAsText(file);
-  };
-  input.click();
-}
-
-function minifyCode() {
-  const editor = document.getElementById('codeEditor');
-  if (!editor) return;
-  
-  let content = editor.value;
-  content = content.replace(/\/\*[\s\S]*?\*\//g, '');
-  content = content.replace(/\/\/.*$/gm, '');
-  content = content.replace(/\s+/g, ' ');
-  content = content.replace(/;\s*/g, ';');
-  content = content.replace(/{\s*/g, '{');
-  content = content.replace(/\s*}/g, '}');
-  content = content.replace(/\(\s*/g, '(');
-  content = content.replace(/\s*\)/g, ')');
-  content = content.trim();
-  
-  editor.value = content;
-  state.content = content;
-  updateHighlight(content, document.getElementById('langSelect').value);
-  updateLineNumbers(content);
-  updateStats(content);
-  showToast('📦 Đã minify!');
-}
-
-function sharePaste() {
-  const editor = document.getElementById('codeEditor');
-  const nameInput = document.getElementById('nameInput');
-  if (!editor || !editor.value.trim()) {
-    showToast('⚠️ Không có nội dung để share');
-    return;
-  }
-  
-  const content = editor.value;
-  const name = nameInput ? nameInput.value || 'untitled' : 'untitled';
-  const language = document.getElementById('langSelect').value;
-  
-  if (navigator.share) {
-    navigator.share({
-      title: name,
-      text: content.slice(0, 1000) + (content.length > 1000 ? '...' : ''),
-      url: window.location.href
-    }).catch(() => {});
-  } else {
-    const id = generateId();
-    const paste = {
-      id: id,
-      name: name,
-      content: content,
-      language: language,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      views: 0,
-      rawViews: 0,
-      securityWarnings: []
-    };
-    state.pastes.push(paste);
-    saveState();
-    const url = window.location.origin + `/view/${id}/${encodeURIComponent(name)}`;
-    navigator.clipboard.writeText(url).then(() => {
-      showToast('🔗 Đã tạo và copy link share!');
-    }).catch(() => {
-      showToast('🔗 Link: ' + url);
-    });
-  }
+  showToast('Da export!');
 }
 
 function escapeHtml(text) {
@@ -1002,11 +1177,11 @@ function copyContent() {
   const editor = document.getElementById('codeEditor');
   if (editor) {
     navigator.clipboard.writeText(editor.value).then(() => {
-      showToast('📋 Đã copy nội dung!');
+      showToast('Da copy noi dung!');
     }).catch(() => {
       editor.select();
       document.execCommand('copy');
-      showToast('📋 Đã copy nội dung!');
+      showToast('Da copy noi dung!');
     });
   }
 }
@@ -1015,7 +1190,7 @@ function copyViewContent() {
   const content = document.querySelector('.view-content');
   if (content) {
     navigator.clipboard.writeText(content.textContent).then(() => {
-      showToast('📋 Đã copy nội dung!');
+      showToast('Da copy noi dung!');
     }).catch(() => {});
   }
 }
@@ -1023,9 +1198,9 @@ function copyViewContent() {
 function copyRawLink(rawUrl) {
   const fullUrl = window.location.origin + rawUrl;
   navigator.clipboard.writeText(fullUrl).then(() => {
-    showToast('🔗 Đã copy link RAW!');
+    showToast('Da copy link RAW!');
   }).catch(() => {
-    showToast('🔗 Link RAW: ' + fullUrl);
+    showToast('Link RAW: ' + fullUrl);
   });
 }
 
@@ -1068,7 +1243,7 @@ function toggleWordWrap() {
     pre.style.whiteSpace = state.wordWrap ? 'pre-wrap' : 'pre';
     pre.style.wordWrap = state.wordWrap ? 'break-word' : 'normal';
   }
-  showToast(state.wordWrap ? '📏 Word wrap: ON' : '📏 Word wrap: OFF');
+  showToast(state.wordWrap ? 'Word wrap: ON' : 'Word wrap: OFF');
 }
 
 function formatCode() {
@@ -1085,7 +1260,7 @@ function formatCode() {
     try {
       formatted = JSON.stringify(JSON.parse(content), null, 2);
     } catch(e) {
-      showToast('❌ Lỗi format JSON!');
+      showToast('Loi format JSON!');
       return;
     }
   } else if (lang === 'html' || lang === 'xml') {
@@ -1103,7 +1278,7 @@ function formatCode() {
   updateHighlight(formatted, langSelect ? langSelect.value : 'auto');
   updateLineNumbers(formatted);
   updateStats(formatted);
-  showToast('✨ Đã format!');
+  showToast('Da format!');
 }
 
 function showToast(message) {
